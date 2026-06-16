@@ -1,0 +1,46 @@
+% ===========================================================
+\section{Introduction}
+% ===========================================================
+
+MAX phases are a family of ternary layered ceramics with the general
+formula M\textsubscript{2}AX, where M is an early transition metal,
+A is an A-group element, and X is either carbon or nitrogen~\cite{Barsoum2000}.
+Their unique combination of metallic electrical and thermal conductivity with
+ceramic hardness and high-temperature stability makes them attractive
+for applications in nuclear cladding, high-temperature coatings,
+and next-generation electronics~\cite{Gogotsi2019}.
+
+The lattice-dynamical properties of MAX phases --- encoded in their
+phonon dispersion relations $\omega(\vq)$ --- are central to understanding
+thermal transport, mechanical stability, and superconductivity.
+Conventional \textit{ab initio} calculations based on density functional
+perturbation theory (DFPT) are highly accurate but scale poorly:
+a single phonon band structure requires tens of CPU-hours,
+making high-throughput exploration of compositional space
+computationally prohibitive.
+
+Machine-learning interatomic potentials (MLIPs) have emerged as a
+powerful tool to bridge this gap~\cite{Behler2007,Batzner2022}.
+Graph neural networks (GNNs), in particular, are well suited to
+crystalline systems because they operate directly on the atomic graph
+and can naturally encode permutation and translational invariance~\cite{Xie2018}.
+Recent equivariant architectures such as NequIP~\cite{Batzner2022},
+MACE~\cite{Batatia2022}, and eSEN~\cite{TODO} additionally respect
+rotational symmetry (E(3)-equivariance),
+leading to improved data efficiency and physical consistency.
+
+In this work we make the following contributions:
+\begin{enumerate}
+  \item We curate a dataset of \textbf{358 MAX-phase compounds} with
+        DFT-computed force constants, phonon band structures, and
+        elastic constants.
+  \item We develop an \textbf{E(3)-equivariant GNN} with radial basis
+        function (RBF) edge encoding that predicts full phonon
+        dispersion curves from crystal structure alone.
+  \item We incorporate \textbf{physics-informed constraints} ---
+        IFC symmetry, the acoustic sum rule, and band smoothness ---
+        directly into the training objective.
+  \item We perform a systematic \textbf{feature importance analysis}
+        identifying the atomic descriptors most critical for
+        phonon prediction accuracy.
+\end{enumerate}

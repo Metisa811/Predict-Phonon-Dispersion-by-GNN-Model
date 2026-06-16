@@ -1,0 +1,50 @@
+% ===========================================================
+\section{Dataset}
+% ===========================================================
+
+\subsection{Material Selection}
+
+We compiled a dataset of 358 MAX-phase compounds of the
+M\textsubscript{2}AX stoichiometry,
+covering transition metals M $\in$ \{Ti, V, Cr, Zr, Nb, Mo,
+Hf, Ta, W, Sc, Y\},
+A-group elements A $\in$ \{Al, Si, P, S, Ga, Ge, As, In, Sn,
+Sb, Tl, Pb, Bi, Au, Ag, Cu, Zn, Cd, Hg\},
+and X $\in$ \{C, N\}.
+
+\subsection{DFT Calculations}
+
+Crystal structures were optimised at the GGA-PBE level
+using VASP~\cite{Kresse1996}.
+Interatomic force constants were computed via the
+finite-displacement method as implemented in
+Phonopy~\cite{Togo2015},
+using $2\times2\times1$ supercells.
+Phonon dispersion curves were evaluated along the
+standard hexagonal high-symmetry path
+$\Gamma$--M--K--$\Gamma$--A--L--H--A with 357 $\mathbf{q}$-points.
+
+\subsection{Elastic Constants}
+
+Single-crystal elastic constants ($C_{11}$, $C_{12}$, $C_{13}$,
+$C_{33}$, $C_{44}$, $C_{66}$) and derived quantities
+(Hill bulk modulus $B$, shear modulus $G$,
+Young's modulus $E$, Debye temperature $\Theta_D$)
+were computed for all 358 materials using the strain-energy approach.
+
+\subsection{Atomic Feature Vector}
+
+Each atom is represented by a 100-dimensional feature vector
+drawn from the periodic-table database \texttt{ptable2}.
+Features include electronegativity, covalent radii, valence
+electron counts, ionisation energies, and pseudopotential
+parameters.
+A systematic ablation study (Section~\ref{sec:ablation})
+identifies the features most predictive of phonon accuracy.
+
+\subsection{Data Splits}
+
+The 358 structures are split into
+train / validation / test sets of
+286 / 35 / 37 samples (80/10/10\%)
+using a fixed random seed to ensure reproducibility.

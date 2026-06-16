@@ -1,0 +1,51 @@
+% ===========================================================
+\section{Theoretical Background}
+% ===========================================================
+
+\subsection{Phonon Dispersion in Periodic Solids}
+
+For a crystal with $N_{\rm at}$ atoms per unit cell the phonon
+frequencies $\omega_s(\vq)$ are the square roots of the eigenvalues
+of the dynamical matrix
+\begin{equation}
+  \Dmat_{\alpha\beta}^{ij}(\vq)
+  = \frac{1}{\sqrt{M_i M_j}}
+    \sum_{\vR} \IFC_{\alpha\beta}(0i, \vR j)\,
+    e^{i\vq\cdot\vR},
+  \label{eq:dynmat}
+\end{equation}
+where $M_i$ is the mass of atom $i$, $\vR$ runs over lattice vectors,
+and $\IFC_{\alpha\beta}(0i,\vR j)$ are the
+\emph{interatomic force constants} (IFCs)
+\begin{equation}
+  \IFC_{\alpha\beta}(i,j)
+  = \frac{\partial^2 E}{\partial u_\alpha^i\, \partial u_\beta^j}.
+  \label{eq:ifc_def}
+\end{equation}
+
+\subsection{Physical Constraints on IFCs}
+
+\paragraph{Symmetry.}
+Time-reversal and spatial-inversion symmetry require
+$\IFC_{\alpha\beta}(i,j) = \IFC_{\beta\alpha}(j,i)$,
+i.e.~the IFC tensor is symmetric under simultaneous transposition
+of Cartesian and atom indices.
+
+\paragraph{Acoustic Sum Rule (ASR).}
+Translational invariance of the crystal imposes
+\begin{equation}
+  \sum_j \IFC_{\alpha\beta}(i,j) = 0
+  \quad \forall\, i,\alpha,\beta,
+  \label{eq:asr}
+\end{equation}
+which ensures that the three acoustic branches satisfy
+$\omega\to 0$ as $\vq\to\bm{0}$.
+
+\subsection{MAX-Phase Crystal Structure}
+
+All compounds studied here crystallise in the hexagonal
+space group $P6_3/mmc$ (\#194) with $N_{\rm at}=8$ atoms per
+primitive cell, giving $3N_{\rm at}=24$ phonon branches.
+The layered M--A--X stacking confers mechanical anisotropy
+captured by the independent elastic constants
+$C_{11}, C_{12}, C_{13}, C_{33}, C_{44}$.

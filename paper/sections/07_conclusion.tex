@@ -1,0 +1,20 @@
+% ===========================================================
+\section{Conclusion}
+% ===========================================================
+
+We have presented a physics-informed, E(3)-equivariant graph
+neural network for predicting the phonon dispersion relations
+of MAX-phase ceramics.
+By combining RBF-encoded geometric message passing with
+physics-based constraints (IFC symmetry, acoustic sum rule,
+and band smoothness), the model achieves a test-set MAE of
+\TODO{X.XX}\THz, a significant improvement over direct
+regression baselines.
+A leave-one-out feature ablation study reveals that
+electronegativity and covalent radius are the most informative
+atomic descriptors, while enthalpic features are detrimental.
+
+This framework enables millisecond-scale screening of novel
+MAX-phase compositions, reducing the bottleneck posed by
+computationally expensive DFPT calculations and accelerating
+the discovery of MAX phases with tailored phononic properties.

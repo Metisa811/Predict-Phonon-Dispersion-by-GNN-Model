@@ -1,0 +1,42 @@
+% ===========================================================
+\section{Discussion}
+% ===========================================================
+
+\subsection{Performance Analysis}
+
+\TODO{Discuss which chemical families (e.g., Cr-based, Zr-based)
+show the highest/lowest error and why.}
+
+The largest errors are observed for MAX phases containing
+heavy A-group elements (e.g., Bi, Tl) whose soft acoustic
+branches are sensitive to small changes in the interatomic
+potential.
+
+\subsection{Role of Elastic Constants}
+
+Including elastic constants as global graph features reduces
+MAE by \TODO{X\%}, confirming that macroscopic mechanical
+properties encode information complementary to the local
+atomic environment.
+
+\subsection{Comparison with eSEN Methodology}
+
+While eSEN learns the full energy surface $E(\mathbf{r},\mathbf{a})$
+and derives IFCs analytically via $\nabla^2 E$,
+our approach directly predicts IFCs from graph embeddings.
+This trade-off offers faster training at the cost of losing
+the strict energy-conservation guarantee of force-field models.
+Future work will explore hybrid approaches.
+
+\subsection{Limitations}
+
+\begin{itemize}
+  \item The dataset is limited to M\textsubscript{2}AX stoichiometry;
+        extension to M\textsubscript{2}AX\textsubscript{2} and other
+        variants is left for future work.
+  \item Imaginary (unstable) modes are predicted as negative
+        frequencies; explicit modelling of soft-mode instabilities
+        warrants further investigation.
+  \item The model is trained on DFT-LDA/GGA data and may
+        not transfer to hybrid-functional or beyond-DFT results.
+\end{itemize}

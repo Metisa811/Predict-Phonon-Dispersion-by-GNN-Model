@@ -1,0 +1,62 @@
+% ===========================================================
+\section{Results}
+\label{sec:results}
+% ===========================================================
+
+\subsection{Phonon Band Prediction Accuracy}
+
+Table~\ref{tab:main_results} compares the test-set MAE of our
+model against several baselines.
+
+\begin{table}[h]
+\centering
+\caption{Phonon prediction accuracy on the MAX-phase test set.}
+\label{tab:main_results}
+\begin{tabular}{lcc}
+\toprule
+Model & MAE (THz) & RMSE (THz) \\
+\midrule
+Mean predictor (baseline)   & \TODO{X.XX} & \TODO{X.XX} \\
+XGBoost (flat features)     & \TODO{X.XX} & \TODO{X.XX} \\
+Residual MLP                & \TODO{X.XX} & \TODO{X.XX} \\
+Geometric GNN (no physics)  & 0.480       & \TODO{X.XX} \\
+\textbf{Ours (Physics-GNN)} & \textbf{\TODO{X.XX}} & \textbf{\TODO{X.XX}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Feature Importance Analysis}
+\label{sec:feat_results}
+
+Figure~\ref{fig:ablation} shows $\Delta$MAE for the top 10
+most important and 5 most harmful atomic features.
+The electronegativity \texttt{en\_allen} (+19.66\,cm$^{-1}$)
+and Bragg covalent radius \texttt{covalent\_radius\_bragg}
+(+17.01\,cm$^{-1}$) are most critical,
+consistent with the dominant role of chemical bonding in
+determining force constants.
+Conversely, \texttt{heat\_of\_formation} ($-$5.14\,cm$^{-1}$)
+and redundant radius descriptors degrade accuracy,
+likely due to multicollinearity.
+
+% Figure placeholder
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/ablation_bar.pdf}
+  \caption{Feature ablation: $\Delta$MAE when each atomic descriptor
+           is removed. Positive values indicate the feature improves
+           prediction accuracy.}
+  \label{fig:ablation}
+\end{figure}
+
+\subsection{Representative Band Structures}
+
+\TODO{Add figure: predicted vs.~DFT phonon bands for 3--4 representative
+MAX phases (one stable, one borderline stable).}
+
+\subsection{Physical Constraint Satisfaction}
+
+The acoustic sum rule residual $\|\sum_j\IFC_{ij}\|$ decreases
+from \TODO{X.XX} (unconstrained) to \TODO{X.XX} (with ASR loss term),
+confirming that the physics-informed objective improves
+physical consistency.

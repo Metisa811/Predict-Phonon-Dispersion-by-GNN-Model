@@ -1,0 +1,64 @@
+\documentclass[reprint,aps,prb,twocolumn]{revtex4-2}
+
+% ---- Packages ----
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+% ---- Macros ----
+\newcommand{\vq}{\mathbf{q}}
+\newcommand{\vR}{\mathbf{R}}
+\newcommand{\IFC}{\Phi}
+\newcommand{\Dmat}{D}
+\newcommand{\THz}{\,\text{THz}}
+\newcommand{\TODO}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+
+\begin{document}
+
+\title{Predicting Phonon Dispersion of MAX Phases via \\
+       Physics-Informed Equivariant Graph Neural Networks}
+
+\author{Mohammad Mehdi Sadeghi}
+\affiliation{Department of Physics, \TODO{University name}}
+
+\author{\TODO{Co-author if any}}
+\affiliation{\TODO{Affiliation}}
+
+\date{\today}
+
+% ======================================================
+\begin{abstract}
+% ======================================================
+We present a physics-informed, E(3)-equivariant graph neural network (GNN)
+for predicting the full phonon dispersion relations of MAX-phase
+ceramic materials directly from their crystal structure.
+Our model simultaneously leverages interatomic force constants (IFCs),
+per-atom chemical features, and elastic constants as inputs,
+and enforces key physical constraints --- crystal symmetry,
+the acoustic sum rule (ASR), and band smoothness --- through
+a multi-term loss function.
+Trained on a dataset of 358 MAX-phase compounds of the form M\textsubscript{2}AX,
+the model achieves a mean absolute error (MAE) of \TODO{X}\THz\ on held-out test structures,
+representing a \TODO{Y}\% improvement over a direct regression baseline.
+The approach reduces phonon prediction time from days (DFPT) to milliseconds,
+enabling high-throughput screening of novel MAX phases.
+\end{abstract}
+
+\maketitle
+
+% ======================================================
+\input{sections/01_introduction}
+\input{sections/02_background}
+\input{sections/03_dataset}
+\input{sections/04_methods}
+\input{sections/05_results}
+\input{sections/06_discussion}
+\input{sections/07_conclusion}
+% ======================================================
+
+\bibliography{references}
+
+\end{document}

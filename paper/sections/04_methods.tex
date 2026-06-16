@@ -1,0 +1,83 @@
+% ===========================================================
+\section{Methods}
+\label{sec:methods}
+% ===========================================================
+
+\subsection{Graph Representation}
+
+Each crystal structure is converted to a directed graph
+$\mathcal{G}=(\mathcal{V},\mathcal{E})$ where nodes $v_i\in\mathcal{V}$
+represent atoms and edges $(i,j)\in\mathcal{E}$ connect pairs
+within a cutoff radius $r_c = 6$\,\AA.
+The node feature $\mathbf{h}_i^{(0)}\in\mathbb{R}^{100}$ is the
+per-atom chemical descriptor.
+Each edge carries a geometric feature comprising
+(i) a radial basis function (RBF) expansion of the interatomic
+distance $d_{ij}$
+\begin{equation}
+  e_k(d_{ij}) = \exp\!\left(-\gamma\bigl(d_{ij}-\mu_k\bigr)^2\right),
+  \quad k=1,\ldots,64,
+\end{equation}
+and (ii) the unit direction vector $\hat{\mathbf{r}}_{ij}$.
+
+\subsection{Equivariant Message Passing}
+
+Node features are updated through $L=5$ message-passing layers
+\begin{equation}
+  \mathbf{m}_{ij} = \sigma\!\left(
+    W_m[\mathbf{h}_i\,\|\,\mathbf{h}_j\,\|\,\mathbf{e}(d_{ij})\,\|
+    \langle\mathbf{h}_i,\hat{\mathbf{r}}_{ij}\rangle]
+  \right) \odot g(\mathbf{h}_i,\mathbf{e}),
+\end{equation}
+\begin{equation}
+  \mathbf{h}_i^{(l+1)} = \mathbf{h}_i^{(l)}
+    + W_u\!\left[\mathbf{h}_i^{(l)}\,\Bigl\|
+      \sum_{j\in\mathcal{N}(i)}\mathbf{m}_{ij}\right],
+\end{equation}
+where $g$ is a learned scalar gate, $\sigma$ is the SiLU activation,
+and residual connections are used throughout.
+
+\subsection{Graph Pooling and Output Heads}
+
+A graph-level embedding is obtained via attention pooling.
+Two task-specific heads are then applied:
+(1) a \emph{phonon head} producing the flattened band structure
+    $\hat{\omega}\in\mathbb{R}^{N_q\times 24}$, and
+(2) an \emph{elastic head} producing
+    $\hat{\mathbf{C}}\in\mathbb{R}^{12}$.
+
+\subsection{Physics-Informed Training Objective}
+\label{sec:loss}
+
+The total loss is
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_{\rm ph}
+              + \lambda_s\,\mathcal{L}_{\rm smooth}
+              + \lambda_e\,\mathcal{L}_{\rm elastic},
+  \label{eq:loss}
+\end{equation}
+where
+\begin{align}
+  \mathcal{L}_{\rm ph}     &= \frac{1}{N_q B}\sum_{q,b}
+       (\omega_{qb}-\hat\omega_{qb})^2, \\
+  \mathcal{L}_{\rm smooth} &= \frac{1}{N_q B}\sum_{q,b}
+       (\hat\omega_{q+1,b}-2\hat\omega_{q,b}+\hat\omega_{q-1,b})^2,\\
+  \mathcal{L}_{\rm elastic}&= \frac{1}{12}\sum_k(C_k-\hat C_k)^2.
+\end{align}
+We use $\lambda_s=1.5$ and $\lambda_e=0.2$.
+
+\subsection{Training Details}
+
+The model is trained with AdamW ($\eta=3\times10^{-4}$,
+weight decay $10^{-5}$) for up to 600 epochs with cosine
+learning-rate annealing and early stopping (patience = 100).
+All experiments are run on a single Kaggle GPU (P100).
+
+\subsection{Feature Importance Ablation}
+\label{sec:ablation}
+
+To quantify the contribution of each atomic descriptor we perform
+a leave-one-out ablation study using XGBoost as a fast surrogate.
+For each feature $f$ we retrain the model with $f$ removed and
+record $\Delta{\rm MAE}=\text{MAE}_{-f}-\text{MAE}_{\rm full}$;
+positive values indicate the feature is beneficial.
