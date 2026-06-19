@@ -26,12 +26,30 @@ def build_dataset(
     fc_dir: str,
     poscar_dir: str,
     bands_dir: str,
-    csv_file: str,
-    elastic_file: str,
+    csv_file: str = '/kaggle/input/d/metisa81/feature-dataset-split/5_geometry_radius_volume.csv',
+    elastic_file: str = None,
     output_dir: str = './dataset',
     cutoff_radius: float = 6.0,
     random_seed: int = 42,
 ):
+    """
+    Notes
+    -----
+    csv_file default: '5_geometry_radius_volume.csv' (7 atomic features).
+    Chosen after a real train/test comparison across 4 feature sets on the
+    actual 358-material MAX Phase dataset (Dual Graph GNN, June 2026):
+
+        feature_set                 n_features  test_mae
+        5_geometry_radius_volume     7          0.429   <- winner (full 1000-epoch run)
+        9_CLEAN_no_missing         100          0.576
+        2_phonon_PROVEN_best10       12          1.110
+        0_RECOMMENDED_2025_BEST      14          1.162
+
+    See notebooks/11_Feature_Comparison_MAX_Phase.ipynb for the full experiment.
+    Simple geometric features (atomic radius + volume) outperformed larger/more
+    "sophisticated" feature sets that were originally tuned for Matbench Phonons
+    (1265 samples) — likely overfitting on this smaller 358-material dataset.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     # --- Atomic features ---
