@@ -1,0 +1,744 @@
+"""
+Builds notebooks/15_Physics_Informed_IFC_MAX_Phase_Phonopy.ipynb
+A ground-up rebuild of the physics-informed pipeline using the REAL Phonopy
+library to compute frequencies from IFC, instead of a hand-rolled (and buggy)
+Gamma-only formula. Fixes the root cause discovered via debugging:
+  - FORCE_CONSTANTS files are (n_unitcell, n_supercell, 3, 3), not (n,n,3,3)
+  - The supercell_matrix recorded in band.yaml is NOT reliable; the correct
+    diagonal supercell must be auto-detected per material by matching a
+    non-Gamma q-point's frequencies (Gamma alone can't distinguish shapes).
+"""
+import json
+
+cells = []
+
+def md(text):
+    cells.append({"cell_type": "markdown", "metadata": {}, "source": text})
+
+def code(text):
+    cells.append({"cell_type": "code", "metadata": {"trusted": True}, "source": text, "outputs": [], "execution_count": None})
+
+# ============================================================
+md("""# Physics-Informed IFC با موتور واقعی Phonopy — دیتاست کامل MAX Phase (358 ماده)
+
+**نسخه‌ی نهایی — بعد از ریشه‌یابی کامل مشکل MAE=17 در نسخه‌های v1 تا v3**
+
+## خلاصه‌ی تاریخچه‌ی دیباگ (برای مرجع)
+
+سه نسخه‌ی قبلی (v1, v2, v3) همگی روی فرمول دستی `eigvalsh` برای محاسبه‌ی فرکانس از IFC در نقطه‌ی Γ تکیه می‌کردند و MAE همیشه حدود **۱۷ THz** باقی می‌ماند — صرف‌نظر از تغییر ضریب تبدیل واحد یا وزن Loss فیزیکی.
+
+با یک سل تشخیصی (که فرکانس را مستقیماً از **IFC واقعی Phonopy** محاسبه می‌کرد، بدون هیچ مدلی)، ثابت شد که خطا حتی با IFC واقعی هم بالا بود (`~17.75 THz`). این نشان داد مشکل از مدل نبود — از فرمول محاسبه بود.
+
+با بررسی دقیق فایل‌های خام `.fc`, `.yaml`, `.psc` کشف شد:
+1. **فایل `FORCE_CONSTANTS` ماتریسی به‌شکل `(n_unitcell, n_supercell, 3, 3)` است**، نه `(n,n,3,3)` — پارسر دستی notebook‌های قبلی این را اشتباه می‌خواند و بیشتر دیتا را دور می‌ریخت.
+2. **مقدار `supercell_matrix` ثبت‌شده در فایل `band.yaml` غیرقابل‌اعتماد است** — برای نمونه `Zr2ZnN`، فایل نوشته بود `9×9×1` ولی سوپرسل واقعی استفاده‌شده برای تولید `.fc`، `3×3×1` بود.
+3. تنها راه قابل‌اعتماد، استفاده از **خود کتابخانه‌ی Phonopy** + الگوریتمی برای **کشف خودکار** `supercell_matrix` صحیح (با تطبیق فرکانس‌های یک نقطه‌ی q **غیر-Γ**، چون در Γ همه‌ی شکل‌های سوپرسل به‌طور تصادفی یکسان جواب می‌دهند).
+
+این نسخه (v4) این استراتژی را برای **تمام ۳۵۸ ماده** دیتاست MAX Phase پیاده می‌کند.
+
+## معماری این Notebook
+1. برای هر ماده: کشف خودکار `supercell_matrix` صحیح با Phonopy
+2. ساخت دیتاست با IFC کامل (نه فرمول دستی)
+3. آموزش مدل Dual Graph GNN برای پیش‌بینی IFC
+4. Loss = MSE(IFC) + قیدهای فیزیکی (با وزن متعادل از v3) + **MSE فرکانس واقعی Phonopy** (نه فرمول دستی)
+5. ارزیابی نهایی با مقایسه‌ی مستقیم به Notebook ۱۱ (baseline=0.429)
+
+⚠️ **تفاوت کلیدی:** چون محاسبه‌ی فرکانس از IFC اکنون از طریق Phonopy انجام می‌شود (نه فرمول torch قابل‌مشتق‌گیری مستقیم)، گرادیان مستقیم MSE(فرکانس) به IFC از طریق Phonopy عبور نمی‌کند. برای training، IFC MSE به‌عنوان signal اصلی استفاده می‌شود و فرکانس فقط برای **ارزیابی نهایی** (نه backward pass) از طریق Phonopy محاسبه می‌شود.
+""")
+
+code("""!pip install -q phonopy torch_geometric pymatgen torch-cluster torch-sparse torch-scatter torch-spline-conv -t /kaggle/working/custom_lib
+import sys
+sys.path.append('/kaggle/working/custom_lib')
+print("✅ نصب شد")""")
+
+code("""import os
+import json
+import yaml
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+from collections import Counter
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.data import Data, Batch
+from torch_geometric.nn import Set2Set, global_mean_pool, global_max_pool
+from torch_geometric.utils import softmax
+
+from scipy.spatial.distance import cdist
+from sklearn.metrics import mean_absolute_error
+from tqdm.notebook import tqdm
+
+from phonopy import Phonopy
+from phonopy.structure.atoms import PhonopyAtoms
+from phonopy.file_IO import parse_FORCE_CONSTANTS
+
+device = torch.device('cpu')
+print(f"Device: {device}")""")
+
+md("## 2. مسیرهای داده")
+
+code("""FC_DIR       = '/kaggle/input/datasets/metisa81/pgcnndata/extracted_force_constant_All/extracted_force_constant_C'
+POSCAR_DIR   = '/kaggle/input/datasets/metisa81/pgcnndata/all_poscar/all_poscar'
+BANDS_DIR    = '/kaggle/input/datasets/metisa81/pgcnndata/extracted_bands_C/extracted_bands_C'
+ELASTIC_FILE = '/kaggle/input/datasets/metisa81/features-dataset/mechanical_data_fixed.json'
+FEATURE_CSV  = '/kaggle/input/datasets/metisa81/feature-dataset-split/5_geometry_radius_volume.csv'
+
+for name, path in [('FC_DIR', FC_DIR), ('POSCAR_DIR', POSCAR_DIR),
+                    ('BANDS_DIR', BANDS_DIR), ('ELASTIC_FILE', ELASTIC_FILE),
+                    ('FEATURE_CSV', FEATURE_CSV)]:
+    exists = '✅' if os.path.exists(path) else '❌ یافت نشد'
+    print(f"{exists}  {name}  →  {path}")""")
+
+md("""## 3. تابع کلیدی: کشف خودکار Supercell Matrix صحیح
+
+برای هر ماده، با فرض دیاگونال بودن `supercell_matrix` (که در عمل تقریباً همیشه درست است)،
+تمام تجزیه‌های ممکن `a×b×c = n_images` را امتحان می‌کنیم و آن‌که فرکانس‌های یک نقطه‌ی q
+**غیر-Γ** را با کمترین خطا بازتولید کند، انتخاب می‌شود.
+""")
+
+code('''def find_correct_supercell_dim(unitcell, fc, q_test, real_freqs_test, n2_expected):
+    """
+    یافتن صحیح‌ترین supercell_matrix دیاگونال [[a,0,0],[0,b,0],[0,0,c]]
+    با تطبیق فرکانس‌های یک نقطه‌ی q غیر-گاما.
+
+    Returns: (a,b,c) یا None اگر هیچ‌کدام تطبیق نداشت
+    """
+    n_images = n2_expected // len(unitcell.symbols)
+
+    candidates = []
+    for a in range(1, n_images + 1):
+        if n_images % a != 0:
+            continue
+        rem = n_images // a
+        for b in range(1, rem + 1):
+            if rem % b != 0:
+                continue
+            c = rem // b
+            candidates.append((a, b, c))
+
+    best_dim, best_err = None, np.inf
+    for (a, b, c) in candidates:
+        try:
+            phonon = Phonopy(unitcell, supercell_matrix=[[a,0,0],[0,b,0],[0,0,c]])
+            if len(phonon.supercell.symbols) != n2_expected:
+                continue
+            phonon.force_constants = fc
+            phonon.run_qpoints([q_test])
+            freqs = np.sort(phonon.get_qpoints_dict()['frequencies'][0])
+            if len(freqs) != len(real_freqs_test):
+                continue
+            err = np.max(np.abs(freqs - real_freqs_test))
+            if err < best_err:
+                best_err = err
+                best_dim = (a, b, c)
+        except Exception:
+            continue
+
+    return best_dim, best_err
+
+
+def load_material_with_phonopy(yaml_path, fc_path):
+    """
+    بارگذاری کامل یک ماده با Phonopy: کشف dim صحیح + ساخت آبجکت Phonopy آماده برای
+    محاسبه‌ی فرکانس در هر نقطه‌ی q دلخواه.
+
+    Returns: dict شامل phonon object, frequencies واقعی, اطلاعات ساختاری، یا None اگر شکست خورد
+    """
+    with open(yaml_path) as f:
+        data = yaml.safe_load(f)
+
+    lattice = np.array(data['lattice'])
+    symbols = [p['symbol'] for p in data['points']]
+    frac_coords = np.array([p['coordinates'] for p in data['points']])
+    masses = [p['mass'] for p in data['points']]
+    n1 = len(symbols)
+
+    fc = parse_FORCE_CONSTANTS(str(fc_path))
+    n2 = fc.shape[1]
+    if fc.shape[0] != n1:
+        return None
+
+    unitcell = PhonopyAtoms(symbols=symbols, cell=lattice, scaled_positions=frac_coords)
+
+    # نقطه‌ی q تست: وسط اولین segment مسیر (تا اطمینان از غیر-گاما بودن)
+    segment_len = data['segment_nqpoint'][0]
+    q_idx = min(segment_len // 2, len(data['phonon']) - 1)
+    q_test = data['phonon'][q_idx]['q-position']
+    real_freqs_test = np.sort([b['frequency'] for b in data['phonon'][q_idx]['band']])
+
+    dim, err = find_correct_supercell_dim(unitcell, fc, q_test, real_freqs_test, n2)
+    if dim is None or err > 0.01:  # آستانه‌ی خطای قابل قبول (THz)
+        return None
+
+    phonon = Phonopy(unitcell, supercell_matrix=[[dim[0],0,0],[0,dim[1],0],[0,0,dim[2]]])
+    phonon.force_constants = fc
+
+    return {
+        'phonon': phonon,
+        'unitcell': unitcell,
+        'symbols': symbols,
+        'frac_coords': frac_coords,
+        'lattice': lattice,
+        'masses': masses,
+        'supercell_dim': dim,
+        'dim_match_error': err,
+        'force_constants': fc,
+        'all_q_points': [p['q-position'] for p in data['phonon']],
+        'all_real_freqs': np.array([sorted([b['frequency'] for b in p['band']]) for p in data['phonon']]),
+    }
+
+print("✅ توابع کشف Supercell و بارگذاری Phonopy آماده شدند")''')
+
+md("""## 4. ساخت دیتاست کامل (با اعتبارسنجی Phonopy برای هر ماده)
+
+⚠️ این مرحله از نسخه‌های قبلی **کندتر** است چون برای هر ماده باید چند `supercell_matrix`
+کاندید را امتحان کند. برای ۳۵۸ ماده ممکن است چند دقیقه طول بکشد.
+""")
+
+code('''POSCAR_DIR_PATH = Path(POSCAR_DIR)
+FC_DIR_PATH = Path(FC_DIR)
+BANDS_DIR_PATH = Path(BANDS_DIR)
+
+fc_files = {f.stem: f for f in FC_DIR_PATH.glob('*.fc')}
+band_yaml_files = {f.stem: f for f in BANDS_DIR_PATH.glob('*.yaml')}
+poscar_files = {f.stem: f for f in POSCAR_DIR_PATH.glob('*.psc')}
+
+common = sorted(set(fc_files) & set(band_yaml_files) & set(poscar_files))
+print(f"تعداد مواد مشترک (با فایل .fc و .yaml و .psc): {len(common)}")
+
+with open(ELASTIC_FILE) as f:
+    elastic_json = json.load(f)
+ELASTIC_KEYS = ['C11','C12','C13','C33','C44','C66',
+                'B_Hill','G_Hill','E_Hill','Poisson_Hill',
+                'Pugh_ratio','Debye_temperature']
+elastic_data = {}
+for entry in elastic_json:
+    mat = entry.get('material', '')
+    vals = [float(entry.get(k, 0) or 0) for k in ELASTIC_KEYS]
+    elastic_data[mat] = np.array(vals, dtype=np.float32)''')
+
+code('''MAX_ATOMS_FOR_IFC = 12
+
+raw_samples = []
+failed_phonopy = []
+failed_other = []
+
+for formula in tqdm(common, desc="بارگذاری مواد با Phonopy"):
+    try:
+        n_atoms_check = sum(1 for _ in open(poscar_files[formula]).readlines()[7:] if _.strip())
+        # quick pre-filter: skip clearly too-large materials before running expensive Phonopy search
+        with open(band_yaml_files[formula]) as f:
+            quick_check = yaml.safe_load(f)
+        if quick_check['natom'] > MAX_ATOMS_FOR_IFC:
+            continue
+
+        result = load_material_with_phonopy(band_yaml_files[formula], fc_files[formula])
+        if result is None:
+            failed_phonopy.append(formula)
+            continue
+
+        positions_cart = result['frac_coords'] @ result['lattice']
+
+        raw_samples.append({
+            'formula':           formula,
+            'n_atoms':           len(result['symbols']),
+            'lattice':           result['lattice'].astype(np.float32),
+            'positions':         positions_cart.astype(np.float32),
+            'atom_elements':     result['symbols'],
+            'masses':            np.array(result['masses'], dtype=np.float32),
+            'force_constants':   result['force_constants'].astype(np.float32),
+            'supercell_dim':     result['supercell_dim'],
+            'elastic_constants': elastic_data.get(formula, np.zeros(len(ELASTIC_KEYS), np.float32)),
+            'y_phonon':          result['all_real_freqs'].astype(np.float32),
+            'phonon_obj':        result['phonon'],  # برای محاسبه‌ی فرکانس در ارزیابی نهایی
+        })
+    except Exception as e:
+        failed_other.append((formula, str(e)))
+
+print(f"\\n✅ موفق (با Phonopy تایید شده): {len(raw_samples)}")
+print(f"❌ شکست در یافتن supercell صحیح: {len(failed_phonopy)}")
+print(f"❌ خطای دیگر: {len(failed_other)}")
+if failed_other[:3]:
+    print("نمونه خطاها:", failed_other[:3])''')
+
+md("## 5. تقسیم Train / Val / Test (seed=42)")
+
+code('''RANDOM_SEED = 42
+rng = np.random.default_rng(RANDOM_SEED)
+idx = rng.permutation(len(raw_samples))
+
+n_total = len(raw_samples)
+n_tr = int(0.8 * n_total)
+n_va = int(0.1 * n_total)
+
+train_idx = idx[:n_tr]
+val_idx   = idx[n_tr:n_tr+n_va]
+test_idx  = idx[n_tr+n_va:]
+
+print(f"Train: {len(train_idx)} | Val: {len(val_idx)} | Test: {len(test_idx)}")''')
+
+md("## 6. ساخت گراف (Bond + Atom) — بدون تغییر نسبت به نسخه‌های قبلی")
+
+code('''CUTOFF = 8.0
+
+df_raw = pd.read_csv(FEATURE_CSV)
+symbol_col = next((c for c in df_raw.columns if c.lower() in ['symbol', 'element', 'atom']), df_raw.columns[0])
+feature_cols = [c for c in df_raw.columns if c not in [symbol_col, 'atomic_number']]
+feature_cols = [c for c in feature_cols if pd.api.types.is_numeric_dtype(df_raw[c])]
+df_features = df_raw[feature_cols].copy()
+df_features.index = df_raw[symbol_col]
+N_ATOM_FEATURES = len(feature_cols)
+print(f"فیچرهای اتمی: {N_ATOM_FEATURES} → {feature_cols}")
+
+
+def structure_to_bond_graph(positions, n_atoms_sample):
+    n = len(positions)
+    distances = cdist(positions, positions)
+    bonds = [(i, j) for i in range(n) for j in range(i+1, n) if distances[i, j] <= CUTOFF]
+
+    if len(bonds) == 0:
+        x = torch.zeros((1, 6), dtype=torch.float)
+        edge_index = torch.zeros((2, 0), dtype=torch.long)
+        edge_attr = torch.zeros((0, 1), dtype=torch.float)
+        u = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float)
+        return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, u=u, n_atoms=torch.tensor([n_atoms_sample]))
+
+    node_features = []
+    for i, j in bonds:
+        d = distances[i, j]
+        coord_i = np.sum(distances[i] <= CUTOFF) - 1
+        coord_j = np.sum(distances[j] <= CUTOFF) - 1
+        node_features.append([d, coord_i, coord_j, (coord_i + coord_j) / 2, 0.0, 0.0])
+    x = torch.tensor(node_features, dtype=torch.float)
+
+    edge_index, edge_attr = [], []
+    for idx1, (i1, j1) in enumerate(bonds):
+        for idx2, (i2, j2) in enumerate(bonds[idx1+1:]):
+            idx2 += idx1 + 1
+            shared = set([i1, j1]) & set([i2, j2])
+            if len(shared) == 1:
+                s = shared.pop()
+                a = positions[i1 if i1 != s else j1] - positions[s]
+                b = positions[i2 if i2 != s else j2] - positions[s]
+                na, nb = np.linalg.norm(a), np.linalg.norm(b)
+                if na > 0 and nb > 0:
+                    cos_angle = np.clip(np.dot(a, b) / (na * nb), -1.0, 1.0)
+                    angle = np.arccos(cos_angle)
+                    edge_index.extend([[idx1, idx2], [idx2, idx1]])
+                    edge_attr.extend([[angle], [angle]])
+
+    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous() if edge_index else torch.zeros((2, 0), dtype=torch.long)
+    edge_attr = torch.tensor(edge_attr, dtype=torch.float) if edge_attr else torch.zeros((0, 1), dtype=torch.float)
+    u = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float)
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, u=u, n_atoms=torch.tensor([n_atoms_sample]))
+
+
+def structure_to_atom_graph(atom_elements, positions, n_atoms_sample):
+    node_features = []
+    for elem in atom_elements:
+        if elem in df_features.index:
+            feats = df_features.loc[elem].values.astype(np.float32)
+        else:
+            feats = np.zeros(N_ATOM_FEATURES, dtype=np.float32)
+        node_features.append(feats)
+    x = torch.tensor(np.array(node_features), dtype=torch.float)
+
+    distances = cdist(positions, positions)
+    edge_index, edge_attr = [], []
+    n = len(positions)
+    for i in range(n):
+        for j in range(n):
+            if i != j and distances[i, j] <= CUTOFF:
+                edge_index.append([i, j])
+                edge_attr.append([distances[i, j]])
+
+    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+    edge_attr = torch.tensor(edge_attr, dtype=torch.float)
+    u = torch.tensor([[1.0]], dtype=torch.float)
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, u=u, n_atoms=torch.tensor([n_atoms_sample]))
+
+print("✅ توابع ساخت گراف آماده شدند")''')
+
+code('''bond_graphs, atom_graphs, ifc_targets = [], [], []
+
+for s in tqdm(raw_samples, desc="ساخت گراف‌ها"):
+    bond_graphs.append(structure_to_bond_graph(s['positions'], s['n_atoms']))
+    atom_graphs.append(structure_to_atom_graph(s['atom_elements'], s['positions'], s['n_atoms']))
+    ifc_targets.append(s['force_constants'])
+
+print(f"✅ {len(bond_graphs)} نمونه گراف‌سازی شد")''')
+
+md("""## 7. معماری مدل: Dual Graph GNN → پیش‌بینی IFC کامل (بدون تغییر)""")
+
+code('''MAX_ATOMS = max(s['n_atoms'] for s in raw_samples)
+print(f"حداکثر تعداد اتم در دیتاست: {MAX_ATOMS}")''')
+
+code('''class CustomMessagePassing(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.attention_mlp = nn.Sequential(
+            nn.Linear(3 * hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, 1),
+            nn.LeakyReLU(0.2)
+        )
+        self.message_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+        )
+
+    def forward(self, x, edge_index, edge_attr):
+        source_nodes = edge_index[0]
+        target_nodes = edge_index[1]
+        neighbor_features = x[source_nodes]
+        target_features = x[target_nodes]
+
+        attention_input = torch.cat([target_features, neighbor_features, edge_attr], dim=1)
+        attention_scores = self.attention_mlp(attention_input)
+        attention_weights = softmax(attention_scores, target_nodes, num_nodes=x.size(0))
+
+        messages = neighbor_features * edge_attr
+        weighted_messages = messages * attention_weights
+
+        num_nodes = x.size(0)
+        aggregated = torch.zeros(num_nodes, self.hidden_dim, device=x.device)
+        aggregated.index_add_(0, target_nodes, weighted_messages)
+
+        return self.message_mlp(aggregated)
+
+
+class DualGraphIFCNet(nn.Module):
+    def __init__(self, n_bond_features=6, n_atom_features=7, edge_dim=1, max_atoms=12):
+        super().__init__()
+        self.max_atoms = max_atoms
+        hidden = 128 if n_atom_features <= 10 else 96
+
+        self.bond_embedding = nn.Sequential(
+            nn.Linear(n_bond_features, hidden), nn.BatchNorm1d(hidden), nn.SiLU(), nn.Dropout(0.1))
+        self.bond_edge_embedding = nn.Sequential(nn.Linear(edge_dim, hidden), nn.SiLU())
+        self.bond_message_layers = nn.ModuleList([CustomMessagePassing(hidden) for _ in range(5)])
+        self.bond_layer_norms = nn.ModuleList([nn.LayerNorm(hidden) for _ in range(5)])
+        self.bond_attention = nn.Sequential(
+            nn.Linear(hidden, hidden // 4), nn.SiLU(), nn.Linear(hidden // 4, 1), nn.Sigmoid())
+
+        self.atom_embedding = nn.Sequential(
+            nn.Linear(n_atom_features, hidden), nn.BatchNorm1d(hidden), nn.SiLU(), nn.Dropout(0.1))
+        self.atom_edge_embedding = nn.Sequential(nn.Linear(edge_dim, hidden), nn.SiLU())
+        self.atom_message_layers = nn.ModuleList([CustomMessagePassing(hidden) for _ in range(2)])
+        self.atom_layer_norms = nn.ModuleList([nn.LayerNorm(hidden) for _ in range(2)])
+        self.atom_attention = nn.Sequential(
+            nn.Linear(hidden, hidden // 4), nn.SiLU(), nn.Linear(hidden // 4, 1), nn.Sigmoid())
+
+        self.bond_residual_weight = nn.Parameter(torch.tensor(0.3))
+        self.atom_residual_weight = nn.Parameter(torch.tensor(0.3))
+
+        self.set2set_pool = Set2Set(hidden, processing_steps=1)
+        self.mean_pool = global_mean_pool
+        self.max_pool = global_max_pool
+        self.global_mlp = nn.Sequential(nn.Linear(3, hidden // 4), nn.SiLU())
+
+        combined_dim = 6 * hidden + hidden // 4
+        ifc_out_dim = max_atoms * max_atoms * 3 * 3
+
+        self.ifc_head = nn.Sequential(
+            nn.Linear(combined_dim, 512), nn.LayerNorm(512), nn.SiLU(), nn.Dropout(0.2),
+            nn.Linear(512, 256), nn.LayerNorm(256), nn.SiLU(), nn.Dropout(0.2),
+            nn.Linear(256, ifc_out_dim)
+        )
+
+    def _encode_graph(self, x, edge_index, edge_attr, embedding, edge_embedding,
+                       message_layers, layer_norms, attention, residual_weight):
+        x = embedding(x)
+        edge_feat = edge_embedding(edge_attr)
+        for i, (msg, ln) in enumerate(zip(message_layers, layer_norms)):
+            x_res = x
+            x = msg(x, edge_index, edge_feat)
+            x = ln(x)
+            if i > 0:
+                x = x + residual_weight * x_res
+            x = F.silu(x)
+        attn = attention(x)
+        return x * attn, x
+
+    def forward(self, bond_data, atom_data):
+        bond_w, x_bond = self._encode_graph(
+            bond_data.x, bond_data.edge_index, bond_data.edge_attr,
+            self.bond_embedding, self.bond_edge_embedding,
+            self.bond_message_layers, self.bond_layer_norms,
+            self.bond_attention, self.bond_residual_weight)
+
+        bond_set2set = self.set2set_pool(bond_w, bond_data.batch)
+        bond_mean = self.mean_pool(x_bond, bond_data.batch)
+        bond_max = self.max_pool(x_bond, bond_data.batch)
+
+        atom_w, x_atom = self._encode_graph(
+            atom_data.x, atom_data.edge_index, atom_data.edge_attr,
+            self.atom_embedding, self.atom_edge_embedding,
+            self.atom_message_layers, self.atom_layer_norms,
+            self.atom_attention, self.atom_residual_weight)
+
+        atom_set2set = self.set2set_pool(atom_w, atom_data.batch)
+        atom_mean = self.mean_pool(x_atom, atom_data.batch)
+        atom_max = self.max_pool(x_atom, atom_data.batch)
+
+        global_features = self.global_mlp(bond_data.u)
+
+        # توجه: اگر دوباره خطای dimension mismatch دیدید (مثل تجربه‌ی قبلی متیسا)،
+        # ترکیب زیر را به 8*hidden تغییر دهید (با افزودن دو بخش zero_pad)
+        combined = torch.cat([
+            bond_set2set, bond_mean, bond_max,
+            atom_set2set, atom_mean, atom_max,
+            global_features
+        ], dim=1)
+
+        ifc_flat = self.ifc_head(combined)
+        batch_size = ifc_flat.shape[0]
+        ifc_pred = ifc_flat.view(batch_size, self.max_atoms, self.max_atoms, 3, 3)
+        return ifc_pred
+
+print("✅ معماری DualGraphIFCNet تعریف شد")''')
+
+md("""## 8. Physics-Informed Losses — وزن‌های متعادل (از v3)""")
+
+code('''def symmetry_loss(ifc_pred, n_atoms_real):
+    total = 0.0
+    batch_size = ifc_pred.shape[0]
+    for b in range(batch_size):
+        n = n_atoms_real[b]
+        ifc = ifc_pred[b, :n, :n, :, :]
+        ifc_T = ifc.permute(1, 0, 3, 2)
+        total = total + torch.mean((ifc - ifc_T) ** 2)
+    return total / batch_size
+
+
+def acoustic_sum_rule_loss(ifc_pred, n_atoms_real):
+    total = 0.0
+    batch_size = ifc_pred.shape[0]
+    for b in range(batch_size):
+        n = n_atoms_real[b]
+        ifc = ifc_pred[b, :n, :n, :, :]
+        asr = torch.sum(ifc, dim=1)
+        total = total + torch.mean(asr ** 2)
+    return total / batch_size
+
+
+LAMBDA_SYMMETRY = 0.05
+LAMBDA_ASR      = 0.1
+
+
+def compute_batch_loss(model, bond_data, atom_data, ifc_target_list, elements_list, device):
+    ifc_pred = model(bond_data, atom_data)
+    batch_size = ifc_pred.shape[0]
+    n_atoms_real = torch.tensor([len(e) for e in elements_list], dtype=torch.long)
+
+    mse_total = 0.0
+    for b in range(batch_size):
+        n = n_atoms_real[b]
+        pred_ifc_b = ifc_pred[b, :n, :n, :, :]
+        true_ifc_b = torch.tensor(ifc_target_list[b], dtype=torch.float32, device=device)
+        mse_total = mse_total + F.mse_loss(pred_ifc_b, true_ifc_b)
+    mse_total = mse_total / batch_size
+
+    sym_loss = symmetry_loss(ifc_pred, n_atoms_real)
+    asr_loss = acoustic_sum_rule_loss(ifc_pred, n_atoms_real)
+
+    total_loss = mse_total + LAMBDA_SYMMETRY * sym_loss + LAMBDA_ASR * asr_loss
+    return total_loss, mse_total.item(), sym_loss.item(), asr_loss.item(), ifc_pred
+
+print(f"✅ Loss ترکیبی: λ_sym={LAMBDA_SYMMETRY}, λ_asr={LAMBDA_ASR}")''')
+
+md("## 9. حلقه‌ی آموزش")
+
+code('''def make_batches(indices, batch_size, shuffle=False):
+    idx_arr = np.array(indices)
+    if shuffle:
+        idx_arr = np.random.permutation(idx_arr)
+    for i in range(0, len(idx_arr), batch_size):
+        yield idx_arr[i:i+batch_size]
+
+
+def run_epoch(model, indices, optimizer=None, batch_size=8, shuffle=False):
+    is_train = optimizer is not None
+    model.train() if is_train else model.eval()
+
+    total_loss, total_mse, total_sym, total_asr = 0., 0., 0., 0.
+    n_batches = 0
+
+    for batch_idx in make_batches(indices, batch_size, shuffle):
+        bond_list = [bond_graphs[i] for i in batch_idx]
+        atom_list = [atom_graphs[i] for i in batch_idx]
+        ifc_list = [ifc_targets[i] for i in batch_idx]
+        elem_list = [raw_samples[i]['atom_elements'] for i in batch_idx]
+
+        bond_batch = Batch.from_data_list(bond_list).to(device)
+        atom_batch = Batch.from_data_list(atom_list).to(device)
+
+        with torch.set_grad_enabled(is_train):
+            if is_train:
+                optimizer.zero_grad()
+            loss, mse_v, sym_v, asr_v, _ = compute_batch_loss(
+                model, bond_batch, atom_batch, ifc_list, elem_list, device)
+            if is_train:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+
+        total_loss += loss.item()
+        total_mse += mse_v
+        total_sym += sym_v
+        total_asr += asr_v
+        n_batches += 1
+
+    n_batches = max(n_batches, 1)
+    return total_loss/n_batches, total_mse/n_batches, total_sym/n_batches, total_asr/n_batches
+
+print("✅ run_epoch آماده شد")''')
+
+code('''model = DualGraphIFCNet(n_bond_features=6, n_atom_features=N_ATOM_FEATURES,
+                         edge_dim=1, max_atoms=MAX_ATOMS).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
+
+EPOCHS = 500
+PATIENCE = 100
+BATCH_SIZE_TRAIN = 8
+
+best_val_loss = float('inf')
+best_state = None
+patience_counter = 0
+
+for epoch in range(EPOCHS):
+    train_loss, train_mse, train_sym, train_asr = run_epoch(
+        model, train_idx, optimizer=optimizer, batch_size=BATCH_SIZE_TRAIN, shuffle=True)
+    val_loss, val_mse, val_sym, val_asr = run_epoch(
+        model, val_idx, optimizer=None, batch_size=BATCH_SIZE_TRAIN, shuffle=False)
+    scheduler.step(val_loss)
+
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        patience_counter = 0
+        torch.save(best_state, '/kaggle/working/best_model_phonopy.pt')
+    else:
+        patience_counter += 1
+
+    if epoch % 10 == 0:
+        print(f"Epoch {epoch:4d} | Train: {train_loss:.4f} | Val: {val_loss:.4f} "
+              f"(MSE={val_mse:.4f}, Sym={val_sym:.4f}, ASR={val_asr:.4f}) ⭐ Best: {best_val_loss:.4f}")
+
+    if patience_counter >= PATIENCE:
+        print(f"⚠️ Early stop در epoch {epoch}")
+        break
+
+model.load_state_dict(best_state)
+print(f"\\n✅ آموزش کامل شد. بهترین Val Loss: {best_val_loss:.4f}")''')
+
+md("""## 10. ارزیابی نهایی — با Phonopy واقعی (نه فرمول دستی)
+
+اینجا تفاوت اصلی این نسخه است: فرکانس از IFC پیش‌بینی‌شده با **خود کتابخانه‌ی Phonopy**
+(با استفاده از `supercell_dim` کشف‌شده‌ی هر ماده) محاسبه می‌شود، نه فرمول دستی `eigvalsh`.
+""")
+
+code('''def predict_frequencies_with_phonopy(ifc_pred_np, sample):
+    """با جایگزینی IFC پیش‌بینی‌شده در آبجکت Phonopy موجود، فرکانس واقعی محاسبه می‌شود."""
+    phonon = sample['phonon_obj']
+    n = sample['n_atoms']
+    # جایگزینی بخش پیش‌بینی‌شده‌ی IFC (با شکل صحیح n_unitcell x n_supercell)
+    original_fc_shape = sample['force_constants'].shape
+    ifc_for_phonopy = ifc_pred_np[:n, :n, :, :]
+
+    # چون مدل فقط n_unitcell x n_unitcell پیش‌بینی می‌کند ولی Phonopy نیاز به
+    # n_unitcell x n_supercell دارد، فقط بلوک on-site/nearest را به‌روزرسانی می‌کنیم
+    # و باقی تصاویر سوپرسل را از IFC واقعی (ground truth) نگه می‌داریم.
+    # این یک محدودیت شناخته‌شده است: مدل باید در آینده whole IFC (شامل تصاویر) پیش‌بینی کند.
+    fc_copy = sample['force_constants'].copy()
+    fc_copy[:n, :n, :, :] = ifc_for_phonopy  # جایگزینی فقط بلوک سلول مرجع
+
+    phonon.force_constants = fc_copy
+    q_points = sample.get('all_q_points_subset', [[0,0,0]])
+    phonon.run_qpoints(q_points)
+    freqs = phonon.get_qpoints_dict()['frequencies']
+    return np.array(freqs)
+
+
+model.eval()
+all_freq_mae = []
+
+with torch.no_grad():
+    for i in tqdm(test_idx, desc="ارزیابی نهایی با Phonopy"):
+        s = raw_samples[i]
+        bond_batch = Batch.from_data_list([bond_graphs[i]]).to(device)
+        atom_batch = Batch.from_data_list([atom_graphs[i]]).to(device)
+        ifc_pred = model(bond_batch, atom_batch)[0].cpu().numpy()
+
+        try:
+            # فقط نقطه‌ی Γ برای سرعت (می‌توان به چند نقطه گسترش داد)
+            s['all_q_points_subset'] = [[0, 0, 0]]
+            pred_freqs = predict_frequencies_with_phonopy(ifc_pred, s)
+            true_peak = float(np.max(s['y_phonon']))
+            pred_peak = float(np.max(np.abs(pred_freqs)))
+            all_freq_mae.append(abs(true_peak - pred_peak))
+        except Exception as e:
+            continue
+
+freq_mae = np.mean(all_freq_mae) if all_freq_mae else float('nan')
+print(f"\\n🔬 MAE فرکانس (با موتور واقعی Phonopy، THz): {freq_mae:.4f}")
+print(f"   Notebook 11 baseline: 0.429")
+print(f"   v1/v2/v3 (فرمول دستی غلط): ~17.2")
+print(f"   این نسخه (Phonopy واقعی): {freq_mae:.4f}")''')
+
+md("""## 11. جمع‌بندی
+
+### نکته‌ی مهم برای محدودیت فعلی
+مدل GNN فقط بلوک `(n_atoms, n_atoms)` مربوط به **سلول مرجع** را پیش‌بینی می‌کند، نه کل ماتریس
+`(n_atoms, n_supercell)`. برای ارزیابی، این بلوک جایگزین IFC واقعی شده و بقیه‌ی تصاویر سوپرسل
+از ground truth گرفته شده‌اند. این یعنی نتیجه‌ی فعلی **حد بالای ممکن** را نشان می‌دهد (چون بخشی
+از IFC هنوز واقعی است)، نه عملکرد کامل مدل.
+
+### مرحله‌ی منطقی بعدی
+برای یک ارزیابی کاملاً منصفانه و قابل‌استفاده در مقاله، مدل باید کل ماتریس
+`(n_atoms, n_supercell, 3, 3)` را پیش‌بینی کند (نه فقط بلوک مرجع). این نیاز به:
+1. افزایش ابعاد خروجی مدل به `n_atoms × n_supercell × 3 × 3`
+2. چون `n_supercell` بین مواد متفاوت است، نیاز به یک طرح padding/masking دقیق‌تر
+
+### ثبت در Obsidian
+- روش کشف خودکار supercell_matrix (بخش ۳) باید در `10 - روند Notebook های Kaggle.md` ثبت شود — این یک یافته‌ی مهم برای کل پروژه است، نه فقط این notebook.
+- نتیجه‌ی MAE این نسخه باید با v1-v3 و Notebook 11 مقایسه و در `08 - نقشه راه مقاله.md` ثبت شود.
+""")
+
+# ============================================================
+notebook = {
+    "metadata": {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {
+            "codemirror_mode": {"name": "ipython", "version": 3},
+            "file_extension": ".py",
+            "mimetype": "text/x-python",
+            "name": "python",
+            "nbconvert_exporter": "python",
+            "pygments_lexer": "ipython3",
+            "version": "3.11.13"
+        },
+        "kaggle": {
+            "accelerator": "gpu",
+            "dataSources": [],
+            "isInternetEnabled": True,
+            "language": "python",
+            "sourceType": "notebook",
+            "isGpuEnabled": True
+        }
+    },
+    "nbformat_minor": 4,
+    "nbformat": 4,
+    "cells": cells
+}
+
+with open('/home/claude/phonon_v4/15_Physics_Informed_IFC_MAX_Phase_Phonopy.ipynb', 'w', encoding='utf-8') as f:
+    json.dump(notebook, f, ensure_ascii=False, indent=1)
+
+print(f"✅ Notebook v4 (Phonopy-based) ساخته شد: {len(cells)} سل")
